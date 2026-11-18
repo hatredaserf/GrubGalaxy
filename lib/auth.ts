@@ -1,3 +1,4 @@
+// lib/auth.ts
 import { CONFIG } from "./config";
 
 export const getAccessToken = (): string | null => {
@@ -8,6 +9,20 @@ export const getAccessToken = (): string | null => {
     return null;
   }
   return token;
+};
+
+export const getUserId = (): number | null => {
+  const token = getAccessToken();
+  if (!token) return null;
+
+  try {
+    const payloadBase64 = token.split(".")[1];
+    const decodedPayload = JSON.parse(atob(payloadBase64));
+    const userId = decodedPayload.sub ?? decodedPayload.id ?? decodedPayload.userId;
+    return userId ? Number(userId) : null;
+  } catch {
+    return null;
+  }
 };
 
 export const setTokens = (accessToken?: string, refreshToken?: string): void => {
