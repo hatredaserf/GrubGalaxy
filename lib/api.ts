@@ -5,6 +5,10 @@ interface FetchOptions extends RequestInit {
   requiresAuth?: boolean;
 }
 
+// Join the base URL and the endpoint with exactly one slash, so "//orders" can never happen
+const buildUrl = (endpoint: string) =>
+  `${CONFIG.API_BASE_URL.replace(/\/+$/, "")}/${endpoint.replace(/^\/+/, "")}`;
+
 export async function apiClient<T>(
   endpoint: string,
   options: FetchOptions = {}
@@ -22,7 +26,7 @@ export async function apiClient<T>(
     }
   }
 
-  const response = await fetch(`${CONFIG.API_BASE_URL}${endpoint}`, {
+  const response = await fetch(buildUrl(endpoint), {
     headers: {
       ...defaultHeaders,
       ...headers,
@@ -39,7 +43,16 @@ export async function apiClient<T>(
   }
 
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+
+  // A server error page (HTML) isn't JSON, so don't let JSON.parse crash with a confusing message
+  let data: any = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { message: text.slice(0, 200) };
+    }
+  }
 
   if (!response.ok) {
     const errorMessage = Array.isArray(data.message)
