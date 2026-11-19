@@ -31,7 +31,8 @@ const BRAND = "GrubGalaxy";
 const DELIVERY_FEE = 49;
 
 // Your backend routes. Adjust these if your server uses different paths.
-const API = { foodItems: "/fooditems", categories: "/categories", orders: "/orders", profile: "/customers/me" };
+// Customer-facing routes live under /my in the NestJS "dashboard" module; categories uses your existing route
+const API = { foodItems: "/my/menu", categories: "/categories", orders: "/my/orders", profile: "/my/profile" };
 
 // Saved in your payment table as payment_method
 const PAYMENT_METHODS = ["Cash on delivery", "GCash", "Card"];
