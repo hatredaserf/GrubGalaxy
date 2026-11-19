@@ -461,12 +461,14 @@ function SuccessOverlay({
   startedAt?: Date;
 }) {
   const live = fixedStep !== undefined;
-  const [step, setStep] = useState(fixedStep ?? 0);
+  const [demoStep, setDemoStep] = useState(0);
+  // An existing order follows its real status and moves as soon as that status changes;
+  // a brand-new order plays the demo timeline
+  const step = live ? (fixedStep as number) : demoStep;
 
-  // A brand-new order plays the demo timeline; an existing order just shows where it is
   useEffect(() => {
     if (live) return;
-    const timers = TRACK_AT.slice(1).map((ms, i) => setTimeout(() => setStep(i + 1), ms));
+    const timers = TRACK_AT.slice(1).map((ms, i) => setTimeout(() => setDemoStep(i + 1), ms));
     return () => timers.forEach(clearTimeout);
   }, [live]);
 
@@ -485,7 +487,7 @@ function SuccessOverlay({
 
   const delivered = step === TRACK_STEPS.length - 1;
   const moving = step === 2 || step === 3;
-  const minutesLeft = live ? Math.max(0, Math.round((eta.arrive.getTime() - Date.now()) / 60000)) : Math.round(eta.minutes * TIME_LEFT[step]);
+  const minutesLeft = Math.round(eta.minutes * TIME_LEFT[step]);
 
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto">
@@ -1330,11 +1332,28 @@ export default function DashboardPage() {
     }
   }, []);
 
+  // Refresh the list without showing a spinner (used while the tracker is open)
+  const refreshOrders = useCallback(async () => {
+    try {
+      const data = await apiClient<MyOrder[]>(API.orders, { method: "GET", requiresAuth: true });
+      setMyOrders(Array.isArray(data) ? data : []);
+    } catch {
+      /* keep showing the last known orders */
+    }
+  }, []);
+
   useEffect(() => {
     if (isChecking) return;
     loadProfile();
     loadOrders();
   }, [isChecking, loadProfile, loadOrders]);
+
+  // While the orders panel or the tracker is open, check for status changes every 5 seconds
+  useEffect(() => {
+    if (panel !== "orders" && !tracking) return;
+    const t = setInterval(refreshOrders, 5000);
+    return () => clearInterval(t);
+  }, [panel, tracking, refreshOrders]);
 
   // Close the account menu on an outside click or Escape
   useEffect(() => {
@@ -1495,6 +1514,8 @@ export default function DashboardPage() {
   };
 
   const pendingCount = myOrders.filter((o) => isActive(o.order_status)).length;
+  // The tracker shows the freshest copy of the order, so it moves when the status changes
+  const tracked = tracking ? (myOrders.find((o) => o.order_id === tracking.order_id) ?? tracking) : null;
   const displayName = profile?.name || profile?.username || "Account";
 
   // Only a loaded menu can be edited (the sample menu has nothing behind it)
@@ -1987,17 +2008,17 @@ export default function DashboardPage() {
         </Drawer>
       )}
 
-      {tracking && (
+      {tracked && (
         <SuccessOverlay
           summary={{
-            count: Number(tracking.item_count),
-            total: Number(tracking.total_amount),
-            payment: tracking.payment_method ?? "",
-            address: tracking.delivery_address ?? "",
+            count: Number(tracked.item_count),
+            total: Number(tracked.total_amount),
+            payment: tracked.payment_method ?? "",
+            address: tracked.delivery_address ?? "",
           }}
-          orderId={tracking.order_id}
-          fixedStep={STATUS_STEP[tracking.order_status] ?? 0}
-          startedAt={new Date(tracking.order_date)}
+          orderId={tracked.order_id}
+          fixedStep={STATUS_STEP[tracked.order_status] ?? 0}
+          startedAt={new Date(tracked.order_date)}
           onClose={() => setTracking(null)}
         />
       )}
