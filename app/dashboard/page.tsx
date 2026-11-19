@@ -43,7 +43,7 @@ const API = {
 
 // Set to true so only admins (usersx.user_role = 'Admin') can add, edit and delete menu items.
 // Set the same flag in the backend (dashboard.service.ts).
-const ONLY_ADMINS_CAN_EDIT_MENU = false;
+const ONLY_ADMINS_CAN_EDIT_MENU = true;
 
 // Saved in your payment table as payment_method
 const PAYMENT_METHODS = ["Cash on delivery", "GCash", "Card"];
