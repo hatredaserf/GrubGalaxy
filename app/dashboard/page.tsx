@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import type { ComponentType, ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Bricolage_Grotesque, Manrope } from "next/font/google";
-import { AlertCircle, Check, ChevronDown, ClipboardList, Loader2, LogOut, MapPin, Mail, Minus, Phone, Plus, RefreshCw, Search, ShoppingBag, UserRound, Wallet, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ClipboardList, Loader2, LogOut, MapPin, Mail, Minus, Pencil, Phone, Plus, RefreshCw, Search, ShoppingBag, Trash2, UserRound, Wallet, X } from "lucide-react";
 import { useAuthGuard } from "@/hooks/useAuthGuard";
 import { apiClient } from "@/lib/api";
 import { clearTokens } from "@/lib/auth";
@@ -32,7 +32,18 @@ const DELIVERY_FEE = 49;
 
 // Your backend routes. Adjust these if your server uses different paths.
 // Customer-facing routes live under /my in the NestJS "dashboard" module; categories uses your existing route
-const API = { foodItems: "/my/menu", categories: "/categories", orders: "/my/orders", profile: "/my/profile" };
+const API = {
+  foodItems: "/my/menu", // GET the menu
+  menu: "/my/menu", // POST to add, PUT /:id to edit, DELETE /:id to remove
+  categories: "/my/categories",
+  restaurants: "/my/restaurants",
+  orders: "/my/orders",
+  profile: "/my/profile",
+};
+
+// Set to true so only admins (usersx.user_role = 'Admin') can add, edit and delete menu items.
+// Set the same flag in the backend (dashboard.service.ts).
+const ONLY_ADMINS_CAN_EDIT_MENU = false;
 
 // Saved in your payment table as payment_method
 const PAYMENT_METHODS = ["Cash on delivery", "GCash", "Card"];
@@ -57,6 +68,8 @@ type Item = {
   tilt: number;
   available: boolean;
   restaurant: string;
+  categoryId?: unknown; // used when editing a food item
+  restaurantId?: unknown;
 };
 type Raw = Record<string, any>;
 
@@ -132,6 +145,8 @@ function normalizeMenu(foods: Raw[], cats: Raw[]): { items: Item[]; categories: 
       name,
       desc: String(pick(f, ["description", "desc", "details"]) ?? ""),
       restaurant: String(pick(f, ["restaurant_name", "restaurantName"]) ?? ""),
+      categoryId: pick(f, ["category_id", "categoryId"]),
+      restaurantId: pick(f, ["restaurant_id", "restaurantId"]),
       price: Number.isFinite(price) ? price : 0,
       category,
       Icon: pickIcon(name, category, i),
@@ -982,6 +997,271 @@ function ProfilePanel({
   );
 }
 
+/* ---------- Add / edit a food item (POST and PUT) ---------- */
+
+type Opt = { id: number; name: string };
+
+// A small "add a new category / restaurant" helper so the form is never stuck with an empty dropdown
+function QuickAdd({ label, placeholder, onAdd }: { label: string; placeholder: string; onAdd: (name: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const add = async () => {
+    if (!name.trim()) {
+      setErr("Type a name first.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      await onAdd(name.trim());
+      setName("");
+      setOpen(false);
+    } catch (e: any) {
+      setErr(e.message || "We couldn't add that. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className={`rounded text-sm font-semibold underline underline-offset-4 hover:text-[#B54708] ${focusRing}`}>
+        + {label}
+      </button>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault(); // don't submit the whole form
+              add();
+            }
+          }}
+          placeholder={placeholder}
+          aria-label={label}
+          autoFocus
+          className={`${fieldClass(false)} !h-10 !rounded-xl !text-[15px]`}
+        />
+        <button type="button" onClick={add} disabled={busy} className={`h-10 shrink-0 rounded-xl bg-[#262626] px-4 text-[15px] font-semibold text-white hover:bg-[#3A3A3A] disabled:opacity-60 ${focusRing}`}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
+        </button>
+        <button type="button" onClick={() => setOpen(false)} aria-label="Cancel" className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-[#5F5850] hover:bg-[#EFE8DE] ${focusRing}`}>
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      {err && <p className="text-sm text-[#9B2C1F]">{err}</p>}
+    </div>
+  );
+}
+
+function FoodFormPanel({
+  item,
+  categories,
+  restaurants,
+  onAddCategory,
+  onAddRestaurant,
+  onDone,
+}: {
+  item: Item | null; // null = create, otherwise edit
+  categories: Opt[];
+  restaurants: Opt[];
+  onAddCategory: (name: string) => Promise<number>;
+  onAddRestaurant: (name: string) => Promise<number>;
+  onDone: (message: string) => void;
+}) {
+  const editing = item !== null;
+  const [name, setName] = useState(item?.name ?? "");
+  const [price, setPrice] = useState(item ? String(item.price) : "");
+  const [categoryId, setCategoryId] = useState(item?.categoryId != null ? String(item.categoryId) : "");
+  const [restaurantId, setRestaurantId] = useState(item?.restaurantId != null ? String(item.restaurantId) : "");
+  const [available, setAvailable] = useState(item ? item.available : true);
+  const [bad, setBad] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  const clear = (k: string) => setBad((b) => b.filter((x) => x !== k));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr("");
+
+    const problems: string[] = [];
+    if (!name.trim()) problems.push("name");
+    if (price.trim() === "" || !Number.isFinite(Number(price)) || Number(price) < 0) problems.push("price");
+    if (!categoryId) problems.push("category");
+    if (!restaurantId) problems.push("restaurant");
+    if (problems.length) {
+      setBad(problems);
+      setErr(problems.length === 1 ? `Check the ${problems[0]} field.` : "Check the highlighted fields.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const body = JSON.stringify({
+        food_name: name.trim(),
+        price: Number(price),
+        category_id: Number(categoryId),
+        restaurant_id: Number(restaurantId),
+        availability: available,
+      });
+      if (editing) {
+        await apiClient(`${API.menu}/${item!.rawId}`, { method: "PUT", requiresAuth: true, body }); // PUT = update
+      } else {
+        await apiClient(API.menu, { method: "POST", requiresAuth: true, body }); // POST = create
+      }
+      onDone(editing ? `${name.trim()} was updated.` : `${name.trim()} was added to the menu.`);
+    } catch (e: any) {
+      setErr(e.message || "We couldn't save that. Please try again.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} noValidate className="space-y-5">
+      <p className="text-[15px] text-[#5F5850]">{editing ? "Change the details below and save." : "Fill in the details to add a dish to the menu."}</p>
+
+      {err && (
+        <div role="alert" className="flex items-start gap-2.5 rounded-2xl border border-[#F5B5AB] bg-[#FDEDEA] p-3.5 text-sm leading-snug text-[#9B2C1F]">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          {err}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <label htmlFor="food-name" className="text-sm font-semibold">Food name</label>
+        <input
+          id="food-name"
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value);
+            clear("name");
+          }}
+          placeholder="e.g. Smash Burger"
+          aria-invalid={bad.includes("name")}
+          autoFocus
+          className={fieldClass(bad.includes("name"))}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="food-price" className="text-sm font-semibold">Price (PHP)</label>
+        <input
+          id="food-price"
+          type="number"
+          inputMode="decimal"
+          min={0}
+          step="0.01"
+          value={price}
+          onChange={(e) => {
+            setPrice(e.target.value);
+            clear("price");
+          }}
+          placeholder="e.g. 149"
+          aria-invalid={bad.includes("price")}
+          className={fieldClass(bad.includes("price"))}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="food-category" className="text-sm font-semibold">Category</label>
+        <select
+          id="food-category"
+          value={categoryId}
+          onChange={(e) => {
+            setCategoryId(e.target.value);
+            clear("category");
+          }}
+          aria-invalid={bad.includes("category")}
+          className={fieldClass(bad.includes("category"))}
+        >
+          <option value="">Select a category</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+        <QuickAdd
+          label="Add a new category"
+          placeholder="e.g. Desserts"
+          onAdd={async (n) => {
+            setCategoryId(String(await onAddCategory(n)));
+            clear("category");
+          }}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="food-restaurant" className="text-sm font-semibold">Restaurant</label>
+        <select
+          id="food-restaurant"
+          value={restaurantId}
+          onChange={(e) => {
+            setRestaurantId(e.target.value);
+            clear("restaurant");
+          }}
+          aria-invalid={bad.includes("restaurant")}
+          className={fieldClass(bad.includes("restaurant"))}
+        >
+          <option value="">Select a restaurant</option>
+          {restaurants.map((r) => (
+            <option key={r.id} value={r.id}>{r.name}</option>
+          ))}
+        </select>
+        <QuickAdd
+          label="Add a new restaurant"
+          placeholder="e.g. Burger Hub"
+          onAdd={async (n) => {
+            setRestaurantId(String(await onAddRestaurant(n)));
+            clear("restaurant");
+          }}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <span id="food-available-label" className="text-sm font-semibold">Availability</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={available}
+          aria-labelledby="food-available-label"
+          onClick={() => setAvailable((v) => !v)}
+          className={`flex h-12 w-full items-center justify-between rounded-2xl border border-[#A39888] bg-[#FCFBF9] px-4 text-base transition-colors hover:border-[#857A6D] ${focusRing}`}
+        >
+          <span>{available ? "Available to order" : "Sold out"}</span>
+          <span className={`relative h-6 w-11 rounded-full transition-colors ${available ? "bg-[#262626]" : "bg-[#D9CFC2]"}`}>
+            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${available ? "left-[22px]" : "left-0.5"}`} />
+          </span>
+        </button>
+      </div>
+
+      <button
+        type="submit"
+        disabled={saving}
+        className={`flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[#E8590C] text-base font-semibold text-[#2A1206] shadow-[0_14px_28px_-12px_rgba(232,89,12,0.8)] transition-colors hover:bg-[#F2701F] disabled:opacity-80 ${focusRing}`}
+      >
+        {saving ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Saving...
+          </>
+        ) : editing ? (
+          "Save changes"
+        ) : (
+          "Add to menu"
+        )}
+      </button>
+    </form>
+  );
+}
+
 /* ---------- Page ---------- */
 
 export default function DashboardPage() {
@@ -1016,6 +1296,12 @@ export default function DashboardPage() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState("");
   const [tracking, setTracking] = useState<MyOrder | null>(null);
+
+  // Menu editing (POST / PUT / DELETE)
+  const [foodForm, setFoodForm] = useState<{ item: Item | null } | null>(null);
+  const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [catOptions, setCatOptions] = useState<Opt[]>([]);
+  const [restOptions, setRestOptions] = useState<Opt[]>([]);
 
   const loadProfile = useCallback(async () => {
     setProfileLoading(true);
@@ -1073,10 +1359,17 @@ export default function DashboardPage() {
     Promise.all([
       apiClient<unknown>(API.foodItems, { method: "GET", requiresAuth: true }),
       apiClient<unknown>(API.categories, { method: "GET", requiresAuth: true }).catch(() => []), // categories are optional
+      apiClient<unknown>(API.restaurants, { method: "GET", requiresAuth: true }).catch(() => []), // only needed for the edit form
     ])
-      .then(([foods, cats]) => {
+      .then(([foods, cats, rests]) => {
         if (cancelled) return;
         const { items, categories } = normalizeMenu(toList(foods), toList(cats));
+        const options = (rows: Raw[], idKeys: string[], nameKeys: string[]): Opt[] =>
+          rows
+            .map((r) => ({ id: Number(pick(r, idKeys)), name: String(pick(r, nameKeys) ?? "") }))
+            .filter((o) => Number.isFinite(o.id) && o.name);
+        setCatOptions(options(toList(cats), ["category_id", "id"], ["category_name", "name"]));
+        setRestOptions(options(toList(rests), ["restaurant_id", "id"], ["restaurant_name", "name"]));
         setMenu(items);
         setCategories(categories);
         setStatus("ready");
@@ -1091,6 +1384,13 @@ export default function DashboardPage() {
       cancelled = true;
     };
   }, [isChecking, reloadKey]);
+
+  // Menu messages fade away on their own
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   // Time-based greeting, set after mount so it never mismatches the server render
   useEffect(() => {
@@ -1196,6 +1496,51 @@ export default function DashboardPage() {
 
   const pendingCount = myOrders.filter((o) => isActive(o.order_status)).length;
   const displayName = profile?.name || profile?.username || "Account";
+
+  // Only a loaded menu can be edited (the sample menu has nothing behind it)
+  const canEdit = status === "ready" && (!ONLY_ADMINS_CAN_EDIT_MENU || profile?.user_role?.toLowerCase() === "admin");
+
+  const foodSaved = (message: string) => {
+    setFoodForm(null);
+    setNotice({ kind: "success", text: message });
+    setReloadKey((k) => k + 1); // reload the menu so the change shows up
+  };
+
+  // DELETE
+  const deleteFood = async (item: Item) => {
+    if (!window.confirm(`Delete "${item.name}" from the menu?`)) return;
+    try {
+      await apiClient(`${API.menu}/${item.rawId}`, { method: "DELETE", requiresAuth: true });
+      setCart((c) => {
+        const { [item.id]: _removed, ...rest } = c;
+        return rest;
+      });
+      setNotice({ kind: "success", text: `${item.name} was deleted.` });
+      setReloadKey((k) => k + 1);
+    } catch (err: any) {
+      setNotice({ kind: "error", text: err.message || "We couldn't delete that item. Please try again." });
+    }
+  };
+
+  // POST a new category or restaurant straight from the form, then pick it
+  const addCategory = async (name: string) => {
+    const c = await apiClient<{ category_id: number; category_name: string }>(API.categories, {
+      method: "POST",
+      requiresAuth: true,
+      body: JSON.stringify({ category_name: name }),
+    });
+    setCatOptions((o) => [...o, { id: c.category_id, name: c.category_name }]);
+    return c.category_id;
+  };
+  const addRestaurant = async (name: string) => {
+    const r = await apiClient<{ restaurant_id: number; restaurant_name: string }>(API.restaurants, {
+      method: "POST",
+      requiresAuth: true,
+      body: JSON.stringify({ restaurant_name: name }),
+    });
+    setRestOptions((o) => [...o, { id: r.restaurant_id, name: r.restaurant_name }]);
+    return r.restaurant_id;
+  };
 
   const openPanel = (kind: "orders" | "profile") => {
     setMenuOpen(false);
@@ -1406,6 +1751,27 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {notice && (
+            <div
+              role={notice.kind === "error" ? "alert" : "status"}
+              className={`mt-6 flex items-center gap-2.5 rounded-2xl border p-4 text-[15px] ${
+                notice.kind === "error" ? "border-[#F5B5AB] bg-[#FDEDEA] text-[#9B2C1F]" : "border-[#BFE3CC] bg-[#EAF6EE] text-[#1E6B41]"
+              }`}
+            >
+              {notice.kind === "error" ? (
+                <AlertCircle className="h-5 w-5 shrink-0" />
+              ) : (
+                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#2E8B57] text-white">
+                  <Check className="h-4 w-4" strokeWidth={3} />
+                </span>
+              )}
+              <p className="min-w-0 flex-1">{notice.text}</p>
+              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss message" className="rounded-lg p-1 hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           {/* Categories */}
           <div className="mt-8 flex flex-wrap items-center gap-2" role="group" aria-label="Filter by category">
             {["All", ...categories].map((c) => {
@@ -1424,6 +1790,16 @@ export default function DashboardPage() {
                 </button>
               );
             })}
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => setFoodForm({ item: null })}
+                className="ml-auto flex h-10 items-center gap-2 rounded-full bg-white px-4 text-[15px] font-semibold text-[#262626] ring-1 ring-[#DDD2C4] transition-colors hover:bg-[#EFE8DE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+              >
+                <Plus className="h-4 w-4" />
+                Add food item
+              </button>
+            )}
           </div>
 
           {/* Menu */}
@@ -1442,8 +1818,22 @@ export default function DashboardPage() {
             <div className="mt-10 rounded-3xl bg-white p-10 text-center ring-1 ring-[#EFE6DA]">
               <p className={`${display.className} text-xl font-extrabold tracking-tight`}>{menu.length === 0 ? "No dishes yet" : "Nothing matches that"}</p>
               <p className="mt-1 text-[15px] text-[#5F5850]">
-                {menu.length === 0 ? "Check back soon, the menu is being updated." : "Try a different word or pick another category."}
+                {menu.length === 0
+                  ? canEdit
+                    ? "Add your first food item to get started."
+                    : "Check back soon, the menu is being updated."
+                  : "Try a different word or pick another category."}
               </p>
+              {menu.length === 0 && canEdit && (
+                <button
+                  type="button"
+                  onClick={() => setFoodForm({ item: null })}
+                  className="mx-auto mt-5 flex h-10 items-center gap-2 rounded-xl bg-[#262626] px-5 text-[15px] font-semibold text-white hover:bg-[#3A3A3A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C] focus-visible:ring-offset-2"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add a food item
+                </button>
+              )}
             </div>
           ) : (
             <ul className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
@@ -1466,6 +1856,26 @@ export default function DashboardPage() {
                       <span className="absolute left-3 top-3 rounded-full bg-white/80 px-3 py-1 text-xs font-semibold text-[#5F5850] ring-1 ring-white">
                         {m.category}
                       </span>
+                      {canEdit && (
+                        <div className="absolute right-3 top-3 flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setFoodForm({ item: m })}
+                            aria-label={`Edit ${m.name}`}
+                            className="grid h-9 w-9 place-items-center rounded-full bg-white/90 text-[#262626] ring-1 ring-white transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteFood(m)}
+                            aria-label={`Delete ${m.name}`}
+                            className="grid h-9 w-9 place-items-center rounded-full bg-white/90 text-[#9B2C1F] ring-1 ring-white transition-colors hover:bg-[#FDEDEA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     <div className="mt-4 flex-1">
@@ -1553,6 +1963,19 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {foodForm && (
+        <Drawer title={foodForm.item ? "Edit food item" : "Add food item"} onClose={() => setFoodForm(null)}>
+          <FoodFormPanel
+            key={foodForm.item ? String(foodForm.item.rawId) : "new"}
+            item={foodForm.item}
+            categories={catOptions}
+            restaurants={restOptions}
+            onAddCategory={addCategory}
+            onAddRestaurant={addRestaurant}
+            onDone={foodSaved}
+          />
+        </Drawer>
+      )}
       {panel === "orders" && (
         <Drawer title="My orders" onClose={() => setPanel(null)} escapeCloses={!tracking}>
           <OrdersPanel orders={myOrders} loading={ordersLoading} error={ordersError} onRefresh={loadOrders} onTrack={setTracking} onBrowse={() => setPanel(null)} />
