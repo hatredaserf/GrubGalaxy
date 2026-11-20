@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bricolage_Grotesque, Manrope } from "next/font/google";
-import { AlertCircle, Check, ChevronDown, ClipboardList, Loader2, LogOut, MapPin, Mail, Minus, Pencil, Phone, Plus, RefreshCw, Search, ShoppingBag, Trash2, UserRound, Wallet, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ClipboardList, Heart, Loader2, LogOut, MapPin, Mail, Minus, Pencil, Phone, Plus, RefreshCw, RotateCcw, Search, Settings2, ShoppingBag, Trash2, UserRound, Wallet, X } from "lucide-react";
 import { useAuthGuard } from "@/hooks/useAuthGuard";
 import { apiClient } from "@/lib/api";
 import { clearTokens } from "@/lib/auth";
@@ -68,6 +69,7 @@ type Item = {
   tilt: number;
   available: boolean;
   restaurant: string;
+  image?: string; // optional photo link
   categoryId?: unknown; // used when editing a food item
   restaurantId?: unknown;
 };
@@ -145,6 +147,7 @@ function normalizeMenu(foods: Raw[], cats: Raw[]): { items: Item[]; categories: 
       name,
       desc: String(pick(f, ["description", "desc", "details"]) ?? ""),
       restaurant: String(pick(f, ["restaurant_name", "restaurantName"]) ?? ""),
+      image: String(pick(f, ["image_url", "image"]) ?? "") || undefined,
       categoryId: pick(f, ["category_id", "categoryId"]),
       restaurantId: pick(f, ["restaurant_id", "restaurantId"]),
       price: Number.isFinite(price) ? price : 0,
@@ -745,6 +748,7 @@ function OrdersPanel({
   error,
   onRefresh,
   onTrack,
+  onReorder,
   onBrowse,
 }: {
   orders: MyOrder[];
@@ -752,6 +756,7 @@ function OrdersPanel({
   error: string;
   onRefresh: () => void;
   onTrack: (o: MyOrder) => void;
+  onReorder: (o: MyOrder) => void;
   onBrowse: () => void;
 }) {
   const [tab, setTab] = useState<"active" | "all">("active");
@@ -827,11 +832,19 @@ function OrdersPanel({
                     <Wallet className="h-4 w-4 shrink-0" aria-hidden />
                     {o.payment_method} · {o.payment_status}
                   </p>
-                  {isActive(o.order_status) && o.order_status in STATUS_STEP && (
-                    <button type="button" onClick={() => onTrack(o)} className={`mt-4 h-10 w-full rounded-xl bg-[#262626] text-[15px] font-semibold text-white transition-colors hover:bg-[#3A3A3A] ${focusRing}`}>
-                      Track order
-                    </button>
-                  )}
+                  <div className="mt-4 flex gap-2">
+                    {isActive(o.order_status) && o.order_status in STATUS_STEP && (
+                      <button type="button" onClick={() => onTrack(o)} className={`h-10 flex-1 rounded-xl bg-[#262626] text-[15px] font-semibold text-white transition-colors hover:bg-[#3A3A3A] ${focusRing}`}>
+                        Track order
+                      </button>
+                    )}
+                    {o.order_status !== "Cancelled" && (
+                      <button type="button" onClick={() => onReorder(o)} className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-white text-[15px] font-semibold text-[#262626] ring-1 ring-[#DDD2C4] transition-colors hover:bg-[#EFE8DE] ${focusRing}`}>
+                        <RotateCcw className="h-4 w-4" aria-hidden />
+                        Order again
+                      </button>
+                    )}
+                  </div>
                 </li>
               );
             })}
@@ -1085,6 +1098,7 @@ function FoodFormPanel({
   const [categoryId, setCategoryId] = useState(item?.categoryId != null ? String(item.categoryId) : "");
   const [restaurantId, setRestaurantId] = useState(item?.restaurantId != null ? String(item.restaurantId) : "");
   const [available, setAvailable] = useState(item ? item.available : true);
+  const [imageUrl, setImageUrl] = useState(item?.image ?? "");
   const [bad, setBad] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -1100,6 +1114,7 @@ function FoodFormPanel({
     if (price.trim() === "" || !Number.isFinite(Number(price)) || Number(price) < 0) problems.push("price");
     if (!categoryId) problems.push("category");
     if (!restaurantId) problems.push("restaurant");
+    if (imageUrl.trim() && !/^https?:\/\//i.test(imageUrl.trim())) problems.push("photo link");
     if (problems.length) {
       setBad(problems);
       setErr(problems.length === 1 ? `Check the ${problems[0]} field.` : "Check the highlighted fields.");
@@ -1114,6 +1129,7 @@ function FoodFormPanel({
         category_id: Number(categoryId),
         restaurant_id: Number(restaurantId),
         availability: available,
+        image_url: imageUrl.trim() || null,
       });
       if (editing) {
         await apiClient(`${API.menu}/${item!.rawId}`, { method: "PUT", requiresAuth: true, body }); // PUT = update
@@ -1171,6 +1187,23 @@ function FoodFormPanel({
           aria-invalid={bad.includes("price")}
           className={fieldClass(bad.includes("price"))}
         />
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="food-image" className="text-sm font-semibold">Photo link <span className="font-normal text-[#5F5850]">(optional)</span></label>
+        <input
+          id="food-image"
+          type="url"
+          value={imageUrl}
+          onChange={(e) => {
+            setImageUrl(e.target.value);
+            clear("photo link");
+          }}
+          placeholder="https://..."
+          aria-invalid={bad.includes("photo link")}
+          className={fieldClass(bad.includes("photo link"))}
+        />
+        <p className="text-sm text-[#5F5850]">Paste a link to a photo of the dish. Without one, the illustrated icon is used.</p>
       </div>
 
       <div className="space-y-2">
@@ -1264,6 +1297,31 @@ function FoodFormPanel({
   );
 }
 
+/* A dish's photo when it has one, otherwise the illustrated icon */
+function FoodArt({ item }: { item: Item }) {
+  const [broken, setBroken] = useState(false);
+  if (item.image && !broken) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={item.image}
+        alt={item.name}
+        loading="lazy"
+        onError={() => setBroken(true)}
+        className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+      />
+    );
+  }
+  return (
+    <>
+      <div className="absolute h-[70%] w-[55%] rounded-full bg-[#FFE3C2]/70 blur-2xl" aria-hidden />
+      <div className="relative w-[46%] transition-transform duration-300 group-hover:scale-110" style={{ transform: `rotate(${item.tilt}deg)` }}>
+        <item.Icon className={ic} />
+      </div>
+    </>
+  );
+}
+
 /* ---------- Page ---------- */
 
 export default function DashboardPage() {
@@ -1304,6 +1362,27 @@ export default function DashboardPage() {
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [catOptions, setCatOptions] = useState<Opt[]>([]);
   const [restOptions, setRestOptions] = useState<Opt[]>([]);
+
+  // Sorting, filters and favorites (favorites are saved in this browser, per user)
+  const [sort, setSort] = useState<"default" | "price-asc" | "price-desc" | "name">("default");
+  const [restaurantFilter, setRestaurantFilter] = useState("All");
+  const [onlyAvailable, setOnlyAvailable] = useState(false);
+  const [onlyFavs, setOnlyFavs] = useState(false);
+  const [favs, setFavs] = useState<string[]>([]);
+  const favKey = profile ? `grubgalaxy-favorites-${profile.user_id}` : null;
+
+  useEffect(() => {
+    if (!favKey) return;
+    try {
+      setFavs(JSON.parse(localStorage.getItem(favKey) ?? "[]"));
+    } catch {
+      setFavs([]);
+    }
+  }, [favKey]);
+
+  useEffect(() => {
+    document.title = "Menu | GrubGalaxy";
+  }, []);
 
   const loadProfile = useCallback(async () => {
     setProfileLoading(true);
@@ -1427,10 +1506,21 @@ export default function DashboardPage() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return menu.filter(
-      (m) => (category === "All" || m.category === category) && (!q || `${m.name} ${m.desc}`.toLowerCase().includes(q)),
+    const list = menu.filter(
+      (m) =>
+        (category === "All" || m.category === category) &&
+        (restaurantFilter === "All" || m.restaurant === restaurantFilter) &&
+        (!onlyAvailable || m.available) &&
+        (!onlyFavs || favs.includes(m.id)) &&
+        (!q || `${m.name} ${m.desc} ${m.restaurant}`.toLowerCase().includes(q)),
     );
-  }, [menu, category, query]);
+    if (sort === "price-asc") return [...list].sort((a, b) => a.price - b.price);
+    if (sort === "price-desc") return [...list].sort((a, b) => b.price - a.price);
+    if (sort === "name") return [...list].sort((a, b) => a.name.localeCompare(b.name));
+    return list;
+  }, [menu, category, query, restaurantFilter, onlyAvailable, onlyFavs, favs, sort]);
+
+  const restaurantNames = useMemo(() => Array.from(new Set(menu.map((m) => m.restaurant).filter(Boolean))), [menu]);
 
   const lines: Line[] = menu.filter((m) => cart[m.id]).map((m) => ({ ...m, qty: cart[m.id] }));
   const count = lines.reduce((n, l) => n + l.qty, 0);
@@ -1525,6 +1615,53 @@ export default function DashboardPage() {
     setFoodForm(null);
     setNotice({ kind: "success", text: message });
     setReloadKey((k) => k + 1); // reload the menu so the change shows up
+  };
+
+  const toggleFav = (id: string) => {
+    const next = favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id];
+    setFavs(next);
+    if (favKey) {
+      try {
+        localStorage.setItem(favKey, JSON.stringify(next));
+      } catch {
+        /* storage can be unavailable; favorites still work until the page reloads */
+      }
+    }
+  };
+
+  // Put a past order's items back in the cart
+  const reorder = async (o: MyOrder) => {
+    try {
+      const data = await apiClient<{ items?: { food_id: number; quantity: number }[] }>(`${API.orders}/${o.order_id}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+      const next = { ...cart };
+      let added = 0;
+      let skipped = 0;
+      for (const it of data.items ?? []) {
+        const m = menu.find((x) => String(x.rawId) === String(it.food_id));
+        if (m && m.available) {
+          next[m.id] = (next[m.id] ?? 0) + it.quantity;
+          added += it.quantity;
+        } else {
+          skipped += it.quantity;
+        }
+      }
+      setCart(next);
+      setPlaced(false);
+      setPanel(null);
+      if (added > 0) setCartOpen(true);
+      setNotice({
+        kind: added > 0 ? "success" : "error",
+        text:
+          added > 0
+            ? `Added ${added} ${added === 1 ? "item" : "items"} from order #${o.order_id} to your cart.${skipped ? ` ${skipped} no longer available.` : ""}`
+            : "Those items aren't available any more.",
+      });
+    } catch (err: any) {
+      setNotice({ kind: "error", text: err.message || "We couldn't reorder that. Please try again." });
+    }
   };
 
   // DELETE
@@ -1716,6 +1853,12 @@ export default function DashboardPage() {
                   <UserRound className="h-4 w-4" aria-hidden />
                   Profile
                 </button>
+                {profile?.user_role?.toLowerCase() === "admin" && (
+                  <Link href="/admin/orders" onClick={() => setMenuOpen(false)} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] font-semibold hover:bg-[#EFE8DE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]">
+                    <Settings2 className="h-4 w-4" aria-hidden />
+                    Manage orders
+                  </Link>
+                )}
                 <div className="my-1 h-px bg-[#EFE6DA]" />
                 <button type="button" onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] font-semibold hover:bg-[#EFE8DE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]">
                   <LogOut className="h-4 w-4" aria-hidden />
@@ -1823,6 +1966,55 @@ export default function DashboardPage() {
             )}
           </div>
 
+          {/* Sort and filter */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <label htmlFor="sort-menu" className="sr-only">Sort the menu</label>
+            <select
+              id="sort-menu"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as typeof sort)}
+              className="h-10 rounded-full bg-white px-4 text-[15px] font-semibold text-[#262626] ring-1 ring-[#DDD2C4] hover:bg-[#EFE8DE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+            >
+              <option value="default">Sort: Featured</option>
+              <option value="price-asc">Price: low to high</option>
+              <option value="price-desc">Price: high to low</option>
+              <option value="name">Name: A to Z</option>
+            </select>
+            {restaurantNames.length > 1 && (
+              <>
+                <label htmlFor="restaurant-filter" className="sr-only">Filter by restaurant</label>
+                <select
+                  id="restaurant-filter"
+                  value={restaurantFilter}
+                  onChange={(e) => setRestaurantFilter(e.target.value)}
+                  className="h-10 max-w-[12rem] rounded-full bg-white px-4 text-[15px] font-semibold text-[#262626] ring-1 ring-[#DDD2C4] hover:bg-[#EFE8DE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+                >
+                  <option value="All">All restaurants</option>
+                  {restaurantNames.map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button
+              type="button"
+              aria-pressed={onlyAvailable}
+              onClick={() => setOnlyAvailable((v) => !v)}
+              className={`${"h-10 rounded-full px-4 text-[15px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C] focus-visible:ring-offset-2"} ${onlyAvailable ? "bg-[#262626] text-white" : "bg-white text-[#262626] ring-1 ring-[#DDD2C4] hover:bg-[#EFE8DE]"}`}
+            >
+              Available only
+            </button>
+            <button
+              type="button"
+              aria-pressed={onlyFavs}
+              onClick={() => setOnlyFavs((v) => !v)}
+              className={`${"h-10 rounded-full px-4 text-[15px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C] focus-visible:ring-offset-2"} flex items-center gap-2 ${onlyFavs ? "bg-[#262626] text-white" : "bg-white text-[#262626] ring-1 ring-[#DDD2C4] hover:bg-[#EFE8DE]"}`}
+            >
+              <Heart className={`h-4 w-4 ${onlyFavs ? "fill-white" : ""}`} />
+              Favorites{favs.length > 0 ? ` (${favs.length})` : ""}
+            </button>
+          </div>
+
           {/* Menu */}
           {status === "loading" ? (
             <ul className="mt-6 grid gap-5 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true" aria-label="Loading the menu">
@@ -1867,16 +2059,19 @@ export default function DashboardPage() {
                     style={{ animationDelay: `${0.1 + i * 0.06}s` }}
                   >
                     <div className="relative grid aspect-[4/3] place-items-center overflow-hidden rounded-2xl bg-[radial-gradient(circle_at_50%_40%,#FBF7F1,#EADFD2_90%)]">
-                      <div className="absolute h-[70%] w-[55%] rounded-full bg-[#FFE3C2]/70 blur-2xl" aria-hidden />
-                      <div
-                        className="relative w-[46%] transition-transform duration-300 group-hover:scale-110"
-                        style={{ transform: `rotate(${m.tilt}deg)` }}
-                      >
-                        <m.Icon className={ic} />
-                      </div>
+                      <FoodArt item={m} />
                       <span className="absolute left-3 top-3 rounded-full bg-white/80 px-3 py-1 text-xs font-semibold text-[#5F5850] ring-1 ring-white">
                         {m.category}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleFav(m.id)}
+                        aria-pressed={favs.includes(m.id)}
+                        aria-label={favs.includes(m.id) ? `Remove ${m.name} from favorites` : `Add ${m.name} to favorites`}
+                        className="absolute bottom-3 right-3 grid h-9 w-9 place-items-center rounded-full bg-white/90 ring-1 ring-white transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E8590C]"
+                      >
+                        <Heart className={`h-4 w-4 ${favs.includes(m.id) ? "fill-[#262626] text-[#262626]" : "text-[#5F5850]"}`} />
+                      </button>
                       {canEdit && (
                         <div className="absolute right-3 top-3 flex gap-1.5">
                           <button
@@ -1999,7 +2194,7 @@ export default function DashboardPage() {
       )}
       {panel === "orders" && (
         <Drawer title="My orders" onClose={() => setPanel(null)} escapeCloses={!tracking}>
-          <OrdersPanel orders={myOrders} loading={ordersLoading} error={ordersError} onRefresh={loadOrders} onTrack={setTracking} onBrowse={() => setPanel(null)} />
+          <OrdersPanel orders={myOrders} loading={ordersLoading} error={ordersError} onRefresh={loadOrders} onTrack={setTracking} onReorder={reorder} onBrowse={() => setPanel(null)} />
         </Drawer>
       )}
       {panel === "profile" && (

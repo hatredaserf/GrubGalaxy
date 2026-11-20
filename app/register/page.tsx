@@ -112,6 +112,10 @@ export default function RegisterPage() {
 
   useEffect(() => () => clearTimeout(navTimer.current), []);
 
+  useEffect(() => {
+    document.title = "Sign up | GrubGalaxy";
+  }, []);
+
   // Mouse parallax on the artwork panel only: writes two CSS variables (-1 to 1), no re-renders
   useEffect(() => {
     const el = artRef.current;

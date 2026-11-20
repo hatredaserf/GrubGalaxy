@@ -139,6 +139,10 @@ export default function LoginPage() {
 
   useEffect(() => () => clearTimeout(navTimer.current), []);
 
+  useEffect(() => {
+    document.title = "Log in | GrubGalaxy";
+  }, []);
+
   // Count the bites down in step with the animation
   useEffect(() => {
     if (!eating) return;
